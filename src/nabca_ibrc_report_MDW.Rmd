@@ -1,0 +1,910 @@
+---
+title: "NABCA IBRC"
+author: "Tina Cheng"
+date: "7/25/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(flextable)
+
+theme_set(theme_bw() +
+            theme(panel.grid = element_blank(), 
+                  text = element_text(size = 14)))
+```
+
+
+
+```{r}
+USresults <- read_csv(here::here("data/US_CA_survey718871_25July2022.csv"))
+MXresults <- read_csv(here::here("data/MX_results_2022July25.csv"))
+threatNum <- read_csv(here::here("data/ThreatNum.csv")) 
+```
+
+## ABOUT
+
+NABCA State of the Bats data for USA, CAN, and MEX are composed of reviewer estimates for population size & trend and the scope and severity of threats. 
+
+
+
+```{r}
+#USA Data
+
+#data munging
+USlong <- USresults %>% 
+  mutate_all(as.character) %>% 
+  pivot_longer(cols = `popSize.sz_min.`:`otherSev.user10_conf.`,
+               names_to = "category") %>% 
+  dplyr::select(id, token, sppCode, category, value, cntry) %>% 
+  mutate(cntry = case_when(
+    cntry == "US" ~ "USA",
+    cntry == "CA" ~ "CAN"
+  ))
+
+USparse <- USlong %>% 
+  separate(category, into = c("category", "statistic"), sep = "_") %>% 
+  separate(category, into = c("category", "subcategory"), sep = "\\.") %>% 
+  mutate(metric = case_when(
+    grepl("Scope", category) ~ "scope",
+    grepl("Sev", category) ~ "severity",
+    grepl("Size", category) ~ "size",
+    grepl("Trend", category) ~ "trend"
+  ),
+  category = gsub("Scope", "", category),
+  category = gsub("Sev", "", category),
+  category = gsub("Size", "", category),
+  category = gsub("Trend", "", category)) %>% 
+  mutate(statistic = gsub("\\.", "", statistic))
+
+#dataframe of mean values only for each category
+
+
+#MEX data
+
+#data munging
+MXlong <- MXresults %>% 
+  filter(id != 533) %>% #weird trend (7500)
+  mutate_all(as.character) %>% 
+  pivot_longer(cols = `popSize[sz_min]`:`otherSev[user10_conf]`,
+               names_to = "category") %>% 
+  dplyr::select(id, token, sppCode, category, value, cntry) %>% 
+  mutate(cntry = "MEX")
+
+#dataframe of mean values only for each category
+MXparse <- MXlong %>% 
+  separate(category, into = c("category", "statistic"), sep = "_") %>% 
+  separate(category, into = c("category", "subcategory"), sep = "\\[") %>% 
+  mutate(metric = case_when(
+    grepl("Scope", category) ~ "scope",
+    grepl("Sev", category) ~ "severity",
+    grepl("Size", category) ~ "size",
+    grepl("Trend", category) ~ "trend"
+  ),
+  category = gsub("Scope", "", category),
+  category = gsub("Sev", "", category),
+  category = gsub("Size", "", category),
+  category = gsub("Trend", "", category)) %>% 
+  mutate(statistic = gsub("\\]", "", statistic))
+
+
+means <- USparse %>% 
+  bind_rows(MXparse) %>% 
+  filter(!is.na(sppCode)) %>% 
+  filter(statistic == "mean") 
+
+wider <- USparse %>% 
+  bind_rows(MXparse) %>% 
+  pivot_wider(id_cols = c(token, sppCode, category, metric, subcategory, cntry), names_from = statistic, values_from = value) %>% 
+  mutate(interval_width = as.numeric(`max`) - as.numeric(`min`),
+         `conf` = as.numeric(`conf`)) %>% 
+  rename(conf = `conf`,
+         min = `min`,
+         max = `max`)
+```
+
+```{r}
+threat_means <- 
+```
+
+```{r}
+#Pop 
+
+popSummary <- means %>% 
+  filter(!is.na(sppCode)) %>% 
+  filter(category == "pop") %>% 
+  group_by(sppCode, category, subcategory, metric, cntry) %>% 
+  mutate(value = as.numeric(value)) %>% 
+  dplyr::summarise(meanValue = mean(value, na.rm = T), 
+                   n = n(),
+                   sd = sd(value, na.rm = T)) %>% 
+  mutate(trend_cat = case_when(
+    subcategory == "tr" & n < 3 ~ "insufficient reviewers",
+    subcategory == "tr" & n >= 3 & meanValue < 0 ~ "decreasing",
+    subcategory == "tr" & n >= 3 & meanValue == 0 ~ "stable",
+    subcategory == "tr" & n >= 3 & meanValue > 0 ~ "increasing"
+  ),
+  trend_cat_decreasing  = case_when(
+    trend_cat == "decreasing" & meanValue < 0 & meanValue >= -10 ~ "slight (1-10%)", 
+    trend_cat == "decreasing" & meanValue < 10 & meanValue >= -30 ~ "moderate (11-30%)", 
+    trend_cat == "decreasing" & meanValue < 30 & meanValue >= -70 ~ "serious (31-70%)", 
+    trend_cat == "decreasing" & meanValue < 70 & meanValue >= -100 ~ "extreme (71-100%)" 
+  )) 
+```
+
+
+
+
+```{r}
+
+trend <- popSummary %>% 
+  filter(subcategory == "tr") %>% 
+  group_by(cntry, trend_cat) %>% 
+  summarise(n = n()) %>%
+  ungroup() %>% 
+  add_row(cntry = "MEX", trend_cat = "not reviewed", n = 51) %>% #n: took the number of spp reported by IUCN (140) and subtracted the number reviewed (89)
+  group_by(cntry) %>% 
+  mutate(cntry_total = sum(n),
+         prop = n/cntry_total)
+
+
+```
+
+
+
+```{r}
+
+# Threats
+
+assignImpact <-  function(dat, scope, severity){
+  
+  scope <- enquo(scope)
+  severity <- enquo(severity)
+  
+  dat %>% 
+    mutate_at(vars(!!scope, !!severity), round) %>% 
+    mutate(impactScore = case_when(!!scope <= 10 & !!severity >= 1 ~ "low",
+                                   !!scope >= 11 & !!scope <= 30 & !!severity >= 1 & !!severity <= 30 ~ "low",
+                                   !!scope >= 11 & !!scope <= 30 & !!severity >= 31 ~ "medium",
+                                   !!scope >= 31 & !!severity <= 10 ~ "low",
+                                   !!scope >= 31 & !!scope <= 70 & !!severity >= 11 & !!severity <= 30 ~ "medium",
+                                   !!scope >= 31 & !!scope <= 70 & !!severity >= 31 ~ "high",
+                                   !!scope >= 71 & !!severity >= 11 & !!severity <= 30 ~ "medium",
+                                   !!scope >= 71 & !!severity >= 31 & !!severity <= 70 ~ "high",
+                                   !!scope >= 71 & !!severity >= 71 ~ "very high",
+                                   !!scope == 0 | is.na(!!scope) & !!severity == 0 | is.na(!!severity) ~ "negligible"))
+}
+
+threats <- means %>% 
+  filter(!is.na(metric)) %>% 
+  filter(category != "pop") %>% 
+  mutate(value = as.numeric(value)) %>% 
+  pivot_wider(id_cols = c("sppCode", "category", "subcategory", "token", "cntry"), names_from = "metric", values_from = "value") %>% 
+  mutate(impact_numeric = ((scope/100) * (severity/100))) %>% 
+  left_join(threatNum, by = c("category" = "Q_group", "subcategory" = "Q_sub")) 
+
+
+
+
+#Threats summary
+threatSum <- threats %>% 
+  filter(!is.na(sppCode)) %>% 
+  group_by(sppCode, category, subcategory, cntry) %>% 
+  dplyr::summarise(meanImpact = mean(impact_numeric, na.rm = T), 
+                   meanScope = mean(scope, na.rm = T),
+                   meanSeverity = mean(severity, na.rm = T),
+                   n = n(),
+                   sd = sd(impact_numeric, na.rm = T)) %>% 
+  assignImpact(., meanScope, meanSeverity) %>% 
+  mutate(impactScore = factor(impactScore, levels = c("negligible", "low", "medium", "high", "very high"))) %>% 
+  left_join(threatNum, by = c("category" = "Q_group", "subcategory" = "Q_sub")) %>% 
+  filter(!is.na(Threat))
+
+
+
+```
+
+```{r}
+threatSum %>% 
+  group_by(cntry, sppCode) %>% 
+  summarize(totalDec=sum(meanImpact, na.rm = T)) %>% 
+  arrange(-totalDec)
+```
+```{r}
+threats %>% 
+  select(sppCode, subcategory, impact_numeric) %>% 
+  mutate(impact_numeric=case_when(is.na(impact_numeric) ~ 0,
+                                  T~impact_numeric)) %>% 
+  filter(!is.na(sppCode),
+         !is.na(subcategory),
+         !is.na(impact_numeric)) %>% 
+  kmeans(centers=10)
+```
+
+```{r}
+threatSum %>% 
+  group_by(cntry, sppCode) %>% 
+  summarize(totalDec=sum(meanImpact, na.rm = T)) %>% 
+  arrange(-totalDec) %>% 
+  group_by(cntry) %>% 
+  summarize(n_gt1 = sum(totalDec>1),
+            n_tn1 = sum(totalDec<1))
+```
+
+```{r}
+threatSum %>% 
+  group_by(cntry, sppCode) %>% 
+  summarize(totalDec=sum(meanImpact, na.rm = T)) %>% 
+  arrange(-totalDec) %>% 
+  group_by(cntry) %>%
+  ggplot(aes(y=totalDec, fill= cntry, group=cntry))+
+  geom_histogram()
+```
+
+```{r fig.height=4.5, fig.width=4}
+threatSum %>%
+  group_by(cntry, sppCode, Threat) %>% 
+  summarize(totalCat_Dec=sum(meanImpact, na.rm = T)) %>% 
+  group_by(cntry, sppCode) %>% 
+  mutate(rank=rank(totalCat_Dec)) %>% 
+  group_by(cntry, Threat) %>% 
+  summarize(n=n(),
+            totalRank=sum(rank),
+            avgRank=totalRank/n) %>% 
+  arrange(cntry,totalRank) %>% 
+  ggplot(aes(x=Threat, y=avgRank, group=cntry, fill=cntry))+
+  geom_col()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+
+
+## Population Stats
+
+**Narrative:**
+
+- Mexico: species are largely declining but declines are slight (less than 10%)
+- USA: a majority of species are stable or decreasing; of those decreasing, 13% are extreme declines
+- CAN: a majority of species (65%) lacked enough reviewers to make an assessment; of those species that were reviewed, all are decreasing; of those that are decreasing, 17% are extreme and 33% are serious declines
+
+These trends show that experts are worried and further highlights why we need empirical evidence to determine what is really happening with these populations.
+
+**Notes:**
+
+- Mean pop trend values do not reflect uncertainty both as indicated by the reviewer (lower and upper estimates, confidence rating)
+- There are a number of pop trend estimates whose upper and lower values overlap zero, indicating that the trend is not significantly different from zero (Supplemental Figures 1-3)
+
+### Methods
+
+I took the mean value of population trend among reviewers per species per country. I categorized the mean trend for each species (per country) as:
+
+- not reviewed: this was only the case for MEX; I subtracted the number of spp reviewed (89) by the total number of spp in MEX (140; IUCN Red List)
+- insufficient reviewers: less than 3 reviewers per species per country
+- increasing (>0)
+- stable (=0)
+- decreasing (<0)
+
+
+I further categorized decreasing species by the severity of decline (NatureServe) as:
+
+- slight (1-10%)
+- moderate (11-30%)
+- serious (31-70%)
+- extreme (71-100%)
+
+For each country, I show the proportion of species in each trend category (Figure 1; Table 1) and by severity of decline (Figure 2; Table 2).
+
+
+Table 1. Proportion of species by population trend.
+
+```{r}
+trend %>% 
+  mutate(trend_display = paste0(round(prop, 2)*100, "% (", n, "/", cntry_total, ")"),
+         trend_cat = factor(trend_cat, levels = c("increasing", "stable", "decreasing", "insufficient reviewers", "not reviewed"))) %>% 
+  arrange(trend_cat) %>% 
+  pivot_wider(id_cols = trend_cat, names_from = cntry, values_from = trend_display) %>% 
+  rename(`Population Trend` = trend_cat) %>% 
+  flextable() %>% 
+  autofit()
+```
+
+Table 2. Proportion of species by severity of decline
+
+```{r}
+popSummary %>% 
+  filter(trend_cat == "decreasing") %>% 
+  mutate(trend_cat_decreasing = factor(trend_cat_decreasing, levels = c("extreme (71-100%)", "serious (31-70%)", "moderate (11-30%)", "slight (1-10%)")),
+         cntry = factor(cntry, levels = c("CAN", "USA", "MEX"))) %>% 
+  group_by(cntry, trend_cat_decreasing) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  group_by(cntry) %>% 
+  mutate(cntry_total = sum(n),
+         prop = n/cntry_total) %>% 
+  mutate(trend_display = paste0(round(prop, 2)*100, "% (", n, "/", cntry_total, ")")) %>% 
+  arrange(trend_cat_decreasing) %>% 
+  pivot_wider(id_cols = trend_cat_decreasing, names_from = cntry, values_from = trend_display) %>% 
+  rename(`Severity of Decline` = trend_cat_decreasing) %>% 
+  flextable() %>% 
+  autofit()
+```
+
+```{r, eval = F, fig.height = 5, fig.width = 10}
+USsppRank_popSize <- popSummary %>% 
+  filter(cntry %in% c("USA", "CAN")) %>% 
+filter(category == "pop" & subcategory == "sz") %>% 
+  arrange(meanValue) %>% 
+  distinct(sppCode) %>% pull(sppCode)
+
+p1 <- USmeans %>% 
+  filter(!is.na(sppCode)) %>% 
+  filter(category == "pop" & subcategory == "sz") %>% 
+  mutate(sppCode = factor(sppCode, levels = USsppRank_popSize)) %>% 
+  ggplot(aes(x = sppCode, y = as.numeric(value))) +
+  geom_point() +
+  geom_point(data = USpopSummary %>% 
+               filter(category == "pop" & subcategory == "sz") %>% 
+               mutate(sppCode = factor(sppCode, levels = USsppRank_popSize)),
+             aes(x = sppCode, y = meanValue), color = "red", size = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("") +
+  ylab("Population Size") +
+  scale_y_log10() +
+  ggtitle("USA")
+
+MXsppRank_popSize <- MXpopSummary %>% 
+  filter(category == "pop" & subcategory == "sz") %>% 
+  arrange(meanValue) %>% 
+  distinct(sppCode) %>% pull(sppCode)
+
+
+p2 <- MXmeans %>% 
+  filter(!is.na(sppCode)) %>% 
+  filter(category == "pop" & subcategory == "sz") %>% 
+  mutate(sppCode = factor(sppCode, levels = MXsppRank_popSize)) %>% 
+  ggplot(aes(x = sppCode, y = as.numeric(value))) +
+  geom_point() +
+  geom_point(data = MXpopSummary %>% 
+               filter(category == "pop" & subcategory == "sz") %>% 
+               mutate(sppCode = factor(sppCode, levels = MXsppRank_popSize)),
+             aes(x = sppCode, y = meanValue), color = "red", size = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("") +
+  ylab("Population Size") +
+  scale_y_log10() +
+  ggtitle("MEX")
+
+cowplot::plot_grid(p1, p2)
+```
+
+
+
+```{r, fig.cap = "Figure 1. Proportion of species by population trend. Species are categorized as increasing (trend > 0), stable (trend = 0), or decreasing (trend < 0) based on the mean value of trends solicited from expert reviewers. For species with fewer than three reviewers, no trend was calculated and that species is indicated as having `insufficient reviewers.` For Mexico, there were 51 (out of 140) species that were not reviewed."}
+
+trend %>% 
+  mutate(trend_cat = factor(trend_cat, levels = c("increasing", "stable", "decreasing", "insufficient reviewers", "not reviewed")),
+         cntry = factor(cntry, levels = c("CAN", "USA", "MEX"))) %>% 
+  ggplot() +
+  geom_bar(aes(x = cntry, y = prop, fill = trend_cat), stat = "identity", position = "stack") +
+  scale_fill_manual(values = c("#2c7bb6", "#abd9e9", "#d7191c", "#838383", "#cfcfcf"), "Population \n Trend") +
+  coord_flip() +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 3)) +
+  xlab("") +
+  ylab("Proportion of Species")
+
+```
+
+make country abbrevs three letters
+
+```{r, fig.cap = "Figure 2. Proportion of species by serverity of decline. Species are categorized by decline severity (slight, moderate, serious, or extreme) based on NatureServe criteria."}
+
+popSummary %>% 
+  filter(trend_cat == "decreasing") %>% 
+  mutate(trend_cat_decreasing = factor(trend_cat_decreasing, levels = c("extreme (71-100%)", "serious (31-70%)", "moderate (11-30%)", "slight (1-10%)")),
+         cntry = factor(cntry, levels = c("CAN", "USA", "MEX"))) %>% 
+  ggplot() +
+  geom_bar(aes(x = cntry, fill = trend_cat_decreasing), position = "fill") +
+  scale_fill_manual(values = c("#B30000", "#FF3333", "#FF6666", "#FFB3B3"), "Severity \nof Decline") +
+  coord_flip() +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 2)) +
+  xlab("") +
+  ylab("Proportion of Species")
+```
+
+
+
+Difficult to establish trends for Mexico just based on mean values of trend b/c many of them are really close to zero, so if we were to calculate the 95% CI, they would likely overlap zero.
+
+
+
+```{r, fig.height = 10, fig.width = 8}
+
+plot_trend <- function(cntry_sel){
+  # sppRank_popTrend <- popSummary %>% 
+  #   filter(cntry == cntry_sel) %>% 
+  #   filter(category == "pop" & subcategory == "tr") %>% 
+  #   arrange(meanValue) %>% 
+  #   distinct(sppCode) %>% pull(sppCode)
+  
+  wider %>% 
+    filter(subcategory == "tr" & cntry == cntry_sel) %>% 
+    filter(mean < 500) %>% 
+    ggplot(aes(x = sppCode, y = as.numeric(mean))) +
+    geom_hline(yintercept = 0, color = "grey") +
+    geom_point() +
+    geom_errorbar(aes(x = sppCode, ymin = as.numeric(min), ymax = as.numeric(max)), width = 0) +
+    geom_point(data = popSummary %>% filter(cntry == cntry_sel & metric == "trend"), aes(x = sppCode, y = meanValue), color = "red", alpha = 0.4, size = 3) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    ggtitle(cntry_sel)
+  
+  
+  # means %>% 
+  #   filter(cntry == cntry_sel) %>% 
+  #   filter(category == "pop" & subcategory == "tr") %>% 
+  #   mutate(sppCode = factor(sppCode, levels = sppRank_popTrend)) %>% 
+  #   ggplot(aes(x = sppCode, y = as.numeric(value))) +
+  #   geom_hline(yintercept = 0, color = "grey") +
+  #   geom_point(size = 2, alpha = 0.6) +
+  #   geom_point(data = popSummary %>% filter(cntry == cntry_sel),
+  #              aes(x = sppCode, y = meanValue), color = "red", size = 2) +
+  #   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  #   xlab("") +
+  #   ylab("Population Trend (%)") +
+  #   ylim(-100, 100) +
+  #   ggtitle(cntry_sel)
+  
+}
+```
+
+
+```{r, fig.height = 4, fig.width = 10, fig.width = 8, fig.height = 4, fig.cap = "Supplemental Figure 1. Population trend by species for Mexico. Population trends submitted by each reviewer (black points = mean, black lines = upper and lower estimates) are shown with mean values (red points) overlaid."}
+plot_trend("MEX")
+```
+
+```{r, fig.height = 4, fig.width = 10, , fig.cap = "Supplemental Figure 1. Population trend by species for USA. Population trends submitted by each reviewer (black points = mean, black lines = upper and lower estimates) are shown with mean values (red points) overlaid."}
+plot_trend("USA")
+```
+
+```{r, fig.height = 4, fig.width = 8, , fig.cap = "Supplemental Figure 1. Population trend by species for Canada. Population trends submitted by each reviewer (black points = mean, black lines = upper and lower estimates) are shown with mean values (red points) overlaid."}
+plot_trend("CAN")
+```
+
+## Threats
+
+*What are the threats of highest concern among experts?*
+
+- We know WNS and wind are stressors, but what do experts think about chronic stressors?
+
+- How do we manage species in a multi-threat context?
+
+
+### Methods
+
+For each threat level II, I calculated the mean estimate for scope and severity across reviewers for each species. I then categorized "impact" as:
+
+- negligible: scope and severity is zero or NA
+- low
+- medium
+- high
+- very high
+
+according to this chart for scope and severity:
+
+!(/Users/tcheng/Box/- Missions & Programs/Research & Development/NABat/NABCA/NABCA SoB Report/Analysis_IBRC/www/natureserve_impact.png)
+
+
+
+
+```{r, eval = F, fig.height = 6, fig.width = 12}
+threats <- unique(threatNum$Q_group)
+
+
+
+p1 <- USsummary %>% 
+  filter(!is.na(Threat)) %>% 
+  filter()
+ggplot(aes(x = threat_abbrev, y = meanValue, color = sppCode)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14)) +
+  theme(legend.position = "none") +
+  ylim(0, 100) +
+  ggtitle("USA")
+
+p2 <- MXsummary %>% 
+  filter(!is.na(Threat)) %>% 
+  ggplot(aes(x = threat_abbrev, y = meanValue, color = sppCode)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14)) +
+  theme(legend.position = "none") +
+  ylim(0, 100) +
+  ggtitle("MEX")
+
+
+cowplot::plot_grid(p1, p2)
+```
+
+
+*Which threat impacts the most species?*
+
+
+```{r}
+#sum up threats by spp (to get rid of sub-categories)
+threatAll <- threatSum %>% 
+  filter(!is.na(Threat)) %>% 
+  group_by(sppCode, cntry, Threat, threat_abbrev) %>% 
+  summarise(totImpact = sum(meanImpact, na.rm = T),
+            meanImpact = mean(meanImpact, na.rm = T),
+            meanScopeAll = mean(meanScope, na.rm = T),
+            meanSeverityAll = mean(meanSeverity, na.rm = T),
+            totScopeAll = sum(meanScope, na.rm = T),
+            totSeverityAll = sum(meanSeverity, na.rm = T)) %>% 
+  assignImpact(., meanScopeAll, meanSeverityAll) %>% 
+  rename(meanImpactScore = impactScore) %>% 
+  assignImpact(., totScopeAll, totSeverityAll) %>% 
+  rename(totImpactScore = impactScore) %>% 
+  mutate(totImpactScore = factor(totImpactScore, levels = c("very high", "high", "medium", "low", "negligible")),
+         meanImpactScore = factor(meanImpactScore, levels = c("very high", "high", "medium", "low", "negligible"))
+  ) 
+
+#number of species experiencing a threat by impact level
+threatSppCount <- threatAll %>% 
+  filter(!is.na(Threat)) %>% 
+  group_by(Threat, threat_abbrev, cntry, totImpactScore) %>% 
+  summarise(noSpp = n())
+
+meanThreatSppCount <- threatAll %>% 
+  filter(!is.na(Threat)) %>% 
+  group_by(Threat, threat_abbrev, cntry, meanImpactScore) %>% 
+  summarise(noSpp = n())
+
+# threatAll %>% 
+#   ggplot(aes(x = Threat, fill = totImpactScore)) +
+#   geom_bar(position = "fill") +
+#   facet_wrap(~cntry) +
+#   theme(axis.text.x = element_text(angle = 90)) +
+#   coord_flip()
+```
+
+*MEAN THREAT: Take the mean of sub-categories within a threat group*
+
+```{r, fig.height = 10, fig.width = 12}
+#count the number of species per threat per impact score
+
+plotMeanThreat <- function(cntry_sel){
+  
+  threatSub <- meanThreatSppCount %>% 
+    filter(cntry == cntry_sel) 
+  
+  # threatRank <- threatSub %>% complete(threat_abbrev, meanImpactScore) %>%
+  #   mutate(noSpp = ifelse(is.na(noSpp), 0, noSpp),
+  #          impScoreNum = as.numeric(meanImpactScore)) %>% filter(impScoreNum == max(impScoreNum)) %>%  arrange(meanImpactScore, noSpp) %>% pull(threat_abbrev) 
+  
+  threatSub %>% 
+    # mutate(threat_abbrev = factor(threat_abbrev, levels = threatRank)) %>% 
+    filter(meanImpactScore %in% c("very high", "high", "medium", "low")) %>% 
+    ggplot() +
+    geom_bar(aes(x = threat_abbrev, y = noSpp), position = "dodge", stat = "identity") +
+    facet_wrap(~meanImpactScore, nrow = 1) +
+    coord_flip() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    ggtitle(cntry_sel) +
+    ylab("Number of Species") +
+    xlab("Threat")
+}
+
+p1 <- plotMeanThreat("MEX")
+
+p2 <- plotMeanThreat("USA")
+
+p3 <- plotMeanThreat("CAN")
+
+cowplot::plot_grid(p1, p2, p3, ncol = 1)
+```
+
+*TOTAL THREAT: Take the sum of sub-categories within a threat group*
+
+```{r, fig.height = 10, fig.width = 12}
+#count the number of species per threat per impact score
+
+plotThreat <- function(cntry_sel){
+  
+  threatSub <- threatSppCount %>% 
+    filter(cntry == cntry_sel) 
+  
+  threatRank <- threatSub %>% complete(threat_abbrev, totImpactScore) %>% filter(totImpactScore == "very high") %>% mutate(noSpp = ifelse(is.na(noSpp), 0, noSpp)) %>%  arrange(noSpp) %>% pull(threat_abbrev) 
+  
+  threatSub %>% 
+    mutate(threat_abbrev = factor(threat_abbrev, levels = threatRank)) %>% 
+    filter(totImpactScore %in% c("very high", "high", "medium", "low")) %>% 
+    ggplot() +
+    geom_bar(aes(x = threat_abbrev, y = noSpp), position = "dodge", stat = "identity") +
+    facet_wrap(~totImpactScore, nrow = 1) +
+    coord_flip() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    ggtitle(cntry_sel) +
+    ylab("Number of Species") +
+    xlab("Threat Level I")
+}
+
+p1 <- plotThreat("MEX")
+
+p2 <- plotThreat("USA")
+
+p3 <- plotThreat("CAN")
+
+cowplot::plot_grid(p1, p2, p3, ncol = 1)
+```
+
+*Climate Change: Sub-categories*
+
+Version 1: Number of species by impact level (very high, high, medium, low) in each climate change sub-category 
+
+```{r, fig.height = 10, fig.width = 12}
+#deeper look at climate change
+plotSubThreat <- function(cntry_sel, threat_sel){
+  
+  threatSub <- threatSum %>% 
+    filter(Threat == threat_sel) %>% 
+    filter(cntry == cntry_sel) %>% 
+    group_by(Threat, subT, impactScore) %>% 
+    summarise(noSpp = n())
+  
+  subThreatRank <- threatSub %>% filter(Threat == threat_sel) %>%  complete(subT, impactScore) %>% filter(impactScore == "very high") %>% mutate(noSpp = ifelse(is.na(noSpp), 0, noSpp)) %>%  arrange(noSpp) %>% pull(subT) 
+  
+  threatSub %>% 
+    filter(Threat == threat_sel) %>% 
+    mutate(subT = factor(subT, levels = subThreatRank),
+           impactScore = factor(impactScore, levels = c("very high", "high", "medium", "low", "negligible"))) %>% 
+    #filter(impactScore %in% c("very high", "high", "medium", "low")) %>% 
+    ggplot() +
+    geom_bar(aes(x = subT, y = noSpp), position = "dodge", stat = "identity") +
+    facet_wrap(~impactScore, nrow = 1) +
+    coord_flip() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    ggtitle(cntry_sel) +
+    ylab("Number of Species") +
+    xlab("Threat Level II")
+}
+
+p1 <- plotSubThreat("MEX", "Climate Change")
+p2 <- plotSubThreat("USA", "Climate Change")
+p3 <- plotSubThreat("CAN", "Climate Change")
+
+cowplot::plot_grid(p1, p2, p3, ncol = 1)
+
+# threatSum %>% 
+#   filter(Threat == "Climate Change") %>% 
+#   ggplot(aes(x = subT, y = meanImpact, group = sppCode, fill = impactScore)) +
+#   geom_bar(stat = "identity", position = "dodge") +
+#   theme(
+#         axis.text.x = element_text(angle = 90)) +
+#   facet_wrap(~cntry, scales = "free", ncol = 1) +
+#   coord_flip()
+
+```
+Version 2: Proportion of species by impact level (very high, high, medium, low) in each climate change sub-category 
+
+```{r, fig.height = 10, fig.width = 12}
+plotSubThreat_v2 <- function(cntry_sel, threat_sel){
+  threatSub <- threatSum %>% 
+    filter(Threat == threat_sel) %>% 
+    filter(cntry == cntry_sel) 
+  
+  threatSub %>% 
+    filter(Threat == threat_sel) %>% 
+    filter(impactScore %in% c("very high", "high", "medium", "low", "negligible")) %>% 
+    ggplot() +
+    geom_bar(aes(x = subT, fill = impactScore), position = "fill") +
+    scale_fill_manual(values = c("#B30000", "#FF3333", "#FF6666", "#FFB3B3"), "Severity \nof Decline") +
+    coord_flip() +
+    theme(axis.text.x = element_text(angle = 90), legend.position = "bottom") +
+    ggtitle(cntry_sel) +
+    ylab("Proportion of Species") +
+    xlab("Threat Level II")
+}
+
+p1 <- plotSubThreat_v2("MEX", "Climate Change") + theme(legend.position = "none")
+p2 <- plotSubThreat_v2("USA", "Climate Change") + theme(legend.position = "none")
+p3 <- plotSubThreat_v2("CAN", "Climate Change") + theme(legend.position = "none")
+
+p_leg <- cowplot::get_legend(p1)
+
+p <- cowplot::plot_grid(p1, p2, p3, ncol = 1)
+
+cowplot::plot_grid(p, p_leg, ncol = 1, rel_heights = c(1, 0.1))
+```
+
+**Energy Production & Mining**
+
+Version 1: Number of species by impact level (very high, high, medium, low) in each energy sub-category 
+
+```{r, fig.height = 10, fig.width = 12}
+
+
+
+p1 <- plotSubThreat("MEX", "Energy Production & Mining")
+p2 <- plotSubThreat("USA", "Energy Production & Mining")
+p3 <- plotSubThreat("CAN", "Energy Production & Mining")
+
+cowplot::plot_grid(p1, p2, p3, ncol = 1)
+
+
+
+```
+
+Version 2: Proportion of species by impact level (very high, high, medium, low) in each energy sub-category 
+
+```{r, fig.height = 10, fig.width = 12}
+
+p1 <- plotSubThreat_v2("MEX", "Energy Production & Mining") + theme(legend.position = "none")
+p2 <- plotSubThreat_v2("USA", "Energy Production & Mining") + theme(legend.position = "none")
+p3 <- plotSubThreat_v2("CAN", "Energy Production & Mining") + theme(legend.position = "none")
+
+p_leg <- cowplot::get_legend(p1)
+
+p <- cowplot::plot_grid(p1, p2, p3, ncol = 1)
+
+cowplot::plot_grid(p, p_leg, ncol = 1, rel_heights = c(1, 0.1))
+
+```
+
+
+```{r, eval = F}
+threatSum %>% 
+  filter(Threat == "Climate Change") %>% 
+  filter(cntry == "MEX") %>% 
+  #gather(c(scope:impact_numeric), key = "type", value = "value") %>% 
+  
+  ggplot() +
+  geom_hline(yintercept = 55) +
+  geom_bar(aes(x = subT, y = meanImpact, fill = subT, group = sppCode), position = "dodge", stat = "identity") +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "bottom") +
+  ylim(0, 100) +
+  ylab("Number of Species") +
+  theme(legend.position = "none") +
+  xlab("Threat")
+
+threats %>% 
+  
+  #pivot_longer(cols = c("scope", "severity", "impact_numeric"), names_to = "type", values_to = "value") %>% 
+  #group_by(Threat, subT, cntry, type, sppCode) %>% 
+  #summarise(meanValue = mean(value, na.rm = T),
+  #  n = n())# %>% 
+  filter(Threat == "Climate Change") %>% 
+  filter(cntry == "MEX") %>% 
+  ggplot() +
+  geom_point(aes(x = scope, y = severity, color = subT)) +
+  facet_wrap(~subT) +
+  theme(legend.position = "none")
+
+```
+
+
+*Which species are most impacted?*
+
+```{r, fig.height = 20, fig.width = 6}
+
+
+plot_species_threat <- function(cntry_sel){
+  sppRank_threats <- threatAll %>% filter(cntry == cntry_sel) %>% group_by(sppCode) %>% summarise(overallImpact = sum(totImpact, na.rm = T)) %>% arrange(overallImpact) %>% pull(sppCode)
+  
+  threatAll %>% 
+    filter(cntry == cntry_sel) %>% 
+    mutate(sppCode = factor(sppCode, levels = sppRank_threats)) %>% 
+    ggplot(aes(x = sppCode, y = totImpact, fill = Threat)) +
+    geom_bar(position = "stack", stat = "identity") +
+    coord_flip() +
+    facet_wrap(~cntry) +
+    theme(legend.position = "bottom") +
+    ggtitle(cntry_sel)
+}
+
+# leg <- cowplot::get_legend(p1 + guides(color = guide_legend(nrow = 1)) +
+#     theme(legend.position = "bottom"))
+# 
+# p1 <- plot_species_threat("MEX") + theme(legend.position = "none") 
+# p2 <- plot_species_threat("USA") + theme(legend.position = "none") 
+# p3 <- plot_species_threat("CAN") + theme(legend.position = "none") 
+# p <- cowplot::plot_grid(p1, p2, p3, nrow = 3)
+# 
+# cowplot::plot_grid(p, leg, ncol = 1, rel_heights = c(2, 0.4))
+```
+
+```{r, fig.height = 16, fig.width = 6}
+
+plot_species_threat("MEX")
+```
+
+```{r, fig.height = 8, fig.width = 6}
+
+plot_species_threat("USA")
+```
+
+```{r, fig.height = 6, fig.width = 6}
+
+plot_species_threat("CAN")
+```
+
+```{r, eval = FALSE, fig.height = 10, fig.width = 20}
+
+
+
+threats %>% 
+  filter(cntry == "USA") %>% 
+  filter(sppCode == "MYTHY") %>% 
+  filter(!is.na(scope)) %>% 
+  group_by(category) %>% 
+  summarise(n = n(),
+            no_reviewers = length(unique(token)))
+
+# tmyth <- threats %>% 
+#   filter(cntry == "USA") %>% 
+#   filter(sppCode == "MYTHY") %>% 
+#   #dplyr::select(-impact_numeric) %>% 
+#   filter(category == "cli") %>% 
+#   left_join(threatNum, by = c("category" = "Q_group", "subcategory" = "Q_sub"))
+#   
+# 
+# tmyth %>% 
+#   gather(c(scope:impact_numeric), key = "type", value = "value") %>% 
+#   ggplot(aes(x = subT, y = value, group = token, fill = type)) +
+#   geom_bar(stat = "identity", position = "dodge") +
+#   #facet_wrap(~Threat, scales = "free") +
+#   facet_wrap(~type) +
+#   coord_flip() +
+#   ylim(0, 100) +
+#   theme(legend.position = "bottom")
+
+threatSum %>% 
+  filter(cntry == "USA") %>% 
+  filter(sppCode == "MYTHY") %>% 
+  filter(category == "cli") %>% 
+  ggplot(aes(x = subT, y = meanImpact)) +
+  geom_bar(stat = "identity") +
+  geom_point(data = tmyth, aes(x = subT, y = impact_numeric), color = "red", size = 4) +
+  coord_flip()
+
+```
+
+```{r}
+knitr::knit_exit()
+```
+
+
+### PCA
+
+```{r, eval = F}
+
+
+USpca <- USsummary %>% 
+  filter(!is.na(Threat)) %>% 
+  mutate(meanValue = as.numeric(meanValue)) %>% 
+  pivot_wider(id_cols = c("sppCode"), names_from = c(category, subcategory), values_from = meanValue) %>% 
+  ungroup() %>% 
+  dplyr::select(-sppCode) %>% 
+  mutate_all(funs(replace_na(.,0))) %>% 
+  as.data.frame()
+row.names(USpca) <- unique(USsummary$sppCode)
+
+
+USpcaResults <- prcomp(USpca)
+USpcaResults$rotation <- -1*USpcaResults$rotation
+#USpcaResults$rotation
+USpcaResults$x <- -1*USpcaResults$x
+head(USpcaResults$x)
+biplot(USpcaResults)
+
+```
+
+
+
