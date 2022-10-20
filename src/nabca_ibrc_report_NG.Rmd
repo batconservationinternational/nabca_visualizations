@@ -44,7 +44,7 @@ token_lookup <- USresults_char %>% bind_rows(MXresults_char) %>% distinct(token,
 
 #data munging
 USlong <- USresults %>% 
-  mutate_all(as.character) %>%
+  mutate_all(as.character) %>% 
   pivot_longer(cols = `popSize.sz_min.`:`otherSev.user10_conf.`,
                names_to = "category") %>% 
   dplyr::select(id, token, sppCode, category, value, cntry) %>% 
@@ -66,7 +66,7 @@ USparse <- USlong %>%
   category = gsub("Sev", "", category),
   category = gsub("Size", "", category),
   category = gsub("Trend", "", category)) %>% 
-  mutate(statistic = gsub("\\.", "", statistic)) 
+  mutate(statistic = gsub("\\.", "", statistic))
 
 #dataframe of mean values only for each category
 
@@ -76,7 +76,7 @@ USparse <- USlong %>%
 #data munging
 MXlong <- MXresults %>% 
   filter(id != 533) %>% #weird trend (7500)
-  mutate_all(as.character) %>%
+  mutate_all(as.character) %>% 
   pivot_longer(cols = `popSize[sz_min]`:`otherSev[user10_conf]`,
                names_to = "category") %>% 
   dplyr::select(id, token, sppCode, category, value, cntry) %>% 
@@ -96,19 +96,13 @@ MXparse <- MXlong %>%
   category = gsub("Sev", "", category),
   category = gsub("Size", "", category),
   category = gsub("Trend", "", category)) %>% 
-  mutate(statistic = gsub("\\]", "", statistic)) %>% 
-  mutate(subcategory = gsub("\\]", "", subcategory)) 
+  mutate(statistic = gsub("\\]", "", statistic))
 
-long <- USparse %>% 
-  bind_rows(MXparse) %>% 
-  filter(!is.na(sppCode)) #%>% 
-  # filter(token %in% token_lookup$token) #filter down to only tokens that have a name associated
 
 means <- USparse %>% 
   bind_rows(MXparse) %>% 
-  filter(!is.na(sppCode)) #%>% 
-  # filter(statistic == "mean") %>% 
-  # filter(token %in% token_lookup$token)
+  filter(!is.na(sppCode)) %>% 
+  filter(statistic == "mean") 
 
 wider <- USparse %>% 
   bind_rows(MXparse) %>% 
@@ -117,8 +111,8 @@ wider <- USparse %>%
          `conf` = as.numeric(`conf`)) %>% 
   rename(conf = `conf`,
          min = `min`,
-         max = `max`) #%>% 
-  # filter(token %in% token_lookup$token)
+         max = `max`)
+
 ```
 
 ```{r}
@@ -201,7 +195,8 @@ threatSum_step1 <- threats %>%
   unite("name", c(firstname, lastname), sep= " ", remove = T)
   
   
-threatSum <- threatSum_step1 %>% filter(sumImpact<=1) %>% 
+threatSum <- threatSum_step1 %>% 
+  # filter(sumImpact<=1) %>% 
   ungroup() %>% 
   group_by(sppCode, cntry) %>% 
   summarise(meanImpact = mean(sumImpact),
@@ -210,7 +205,7 @@ threatSum <- threatSum_step1 %>% filter(sumImpact<=1) %>%
   filter(n>1)
 
 outlier_fig <- ggplot() +
-  geom_point(data = threatSum_step1, aes(y = sppCode, x = sumImpact, color = name, text = name), , alpha = 0.7, size = 3) + 
+  geom_point(data = threatSum_step1, aes(y = sppCode, x = sumImpact, color = name, text = name), alpha = 0.7, size = 3) + 
   xlab("Sum of Threat Impacts") +
   ylab("")+
   ggtitle("Sum of Threat Impacts for Each Reviewer for Each Species") +
@@ -219,14 +214,6 @@ outlier_fig <- ggplot() +
 outlier_figly <- ggplotly(outlier_fig, width = 1000, height = 1000, 
                   tooltip = c("text", "y"))
 outlier_figly
-
-saveWidget(myfig, "/Users/ngoodby/Downloads/threat_ass.html")
-# %>% 
-#   assignImpact(., meanScope, meanSeverity) %>%
-#   mutate(impactScore = factor(impactScore, levels = c("negligible", "low", "medium", "high", "very high"))) %>% 
-#   left_join(threatNum, by = c("category" = "Q_group", "subcategory" = "Q_sub")) %>% 
-#   filter(!is.na(Threat))
-
 ```
 
 ```{r}
