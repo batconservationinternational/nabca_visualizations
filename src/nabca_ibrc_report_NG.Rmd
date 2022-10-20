@@ -32,12 +32,19 @@ threatNum <- read_csv(here::here("data/ThreatNum.csv"))
 
 NABCA State of the Bats data for USA, CAN, and MEX are composed of reviewer estimates for population size & trend and the scope and severity of threats. 
 
+
+
 ```{r}
+USresults_char <- USresults %>% mutate_all(as.character)
+MXresults_char <- MXresults %>% mutate_all(as.character)
+token_lookup <- USresults_char %>% bind_rows(MXresults_char) %>% distinct(token, firstname, lastname) 
+#   filter(!is.na(lastname))
+
 #USA Data
 
 #data munging
 USlong <- USresults %>% 
-  mutate_all(as.character) %>% 
+  mutate_all(as.character) %>%
   pivot_longer(cols = `popSize.sz_min.`:`otherSev.user10_conf.`,
                names_to = "category") %>% 
   dplyr::select(id, token, sppCode, category, value, cntry) %>% 
@@ -59,7 +66,7 @@ USparse <- USlong %>%
   category = gsub("Sev", "", category),
   category = gsub("Size", "", category),
   category = gsub("Trend", "", category)) %>% 
-  mutate(statistic = gsub("\\.", "", statistic))
+  mutate(statistic = gsub("\\.", "", statistic)) 
 
 #dataframe of mean values only for each category
 
@@ -69,7 +76,7 @@ USparse <- USlong %>%
 #data munging
 MXlong <- MXresults %>% 
   filter(id != 533) %>% #weird trend (7500)
-  mutate_all(as.character) %>% 
+  mutate_all(as.character) %>%
   pivot_longer(cols = `popSize[sz_min]`:`otherSev[user10_conf]`,
                names_to = "category") %>% 
   dplyr::select(id, token, sppCode, category, value, cntry) %>% 
@@ -89,13 +96,19 @@ MXparse <- MXlong %>%
   category = gsub("Sev", "", category),
   category = gsub("Size", "", category),
   category = gsub("Trend", "", category)) %>% 
-  mutate(statistic = gsub("\\]", "", statistic))
+  mutate(statistic = gsub("\\]", "", statistic)) %>% 
+  mutate(subcategory = gsub("\\]", "", subcategory)) 
 
+long <- USparse %>% 
+  bind_rows(MXparse) %>% 
+  filter(!is.na(sppCode)) #%>% 
+  # filter(token %in% token_lookup$token) #filter down to only tokens that have a name associated
 
 means <- USparse %>% 
   bind_rows(MXparse) %>% 
-  filter(!is.na(sppCode)) %>% 
-  filter(statistic == "mean") 
+  filter(!is.na(sppCode)) #%>% 
+  # filter(statistic == "mean") %>% 
+  # filter(token %in% token_lookup$token)
 
 wider <- USparse %>% 
   bind_rows(MXparse) %>% 
@@ -104,9 +117,9 @@ wider <- USparse %>%
          `conf` = as.numeric(`conf`)) %>% 
   rename(conf = `conf`,
          min = `min`,
-         max = `max`)
+         max = `max`) #%>% 
+  # filter(token %in% token_lookup$token)
 ```
-
 
 ```{r}
 #Pop 
@@ -120,7 +133,7 @@ popSummary <- means %>%
                    n = n(),
                    sd = sd(value, na.rm = T)) %>% 
   mutate(trend_cat = case_when(
-    subcategory == "tr" & n < 3 ~ "insufficient reviewers",
+    subcategory == "tr" & n < 3 ~ "insufficient reviewers", 
     subcategory == "tr" & n >= 3 & meanValue < 0 ~ "decreasing",
     subcategory == "tr" & n >= 3 & meanValue == 0 ~ "stable",
     subcategory == "tr" & n >= 3 & meanValue > 0 ~ "increasing"
@@ -133,11 +146,7 @@ popSummary <- means %>%
   )) 
 ```
 
-
-
-
 ```{r}
-
 trend <- popSummary %>% 
   filter(subcategory == "tr") %>% 
   group_by(cntry, trend_cat) %>% 
@@ -147,10 +156,7 @@ trend <- popSummary %>%
   group_by(cntry) %>% 
   mutate(cntry_total = sum(n),
          prop = n/cntry_total)
-
 ```
-
-
 
 ```{r}
 
@@ -180,25 +186,173 @@ threats <- means %>%
   filter(category != "pop") %>% 
   mutate(value = as.numeric(value)) %>% 
   pivot_wider(id_cols = c("sppCode", "category", "subcategory", "token", "cntry"), names_from = "metric", values_from = "value") %>% 
-  mutate(impact_numeric = (scope/100 + severity/100)) %>% 
+  mutate(scope = as.numeric(scope),
+         severity = as.numeric(severity)) %>%
+  mutate(impact_numeric = ((scope/100) * (severity/100))) %>% 
   left_join(threatNum, by = c("category" = "Q_group", "subcategory" = "Q_sub")) 
 
 #Threats summary
-threatSum <- threats %>% 
-  filter(!is.na(sppCode)) %>% 
-  group_by(sppCode, category, subcategory, cntry) %>% 
-  dplyr::summarise(meanImpact = mean(impact_numeric, na.rm = T), 
-                   meanScope = mean(scope, na.rm = T),
-                   meanSeverity = mean(severity, na.rm = T),
-                   n = n(),
-                   sd = sd(impact_numeric, na.rm = T)) %>% 
-  assignImpact(., meanScope, meanSeverity) %>% 
-  mutate(impactScore = factor(impactScore, levels = c("negligible", "low", "medium", "high", "very high"))) %>% 
-  left_join(threatNum, by = c("category" = "Q_group", "subcategory" = "Q_sub")) %>% 
-  filter(!is.na(Threat))
+threatSum_step1 <- threats %>% 
+  filter(!is.na(sppCode) & !is.na(Threat)) %>% 
+  mutate_if(is.numeric, replace_na, replace = 0) %>% 
+  group_by(sppCode, token, cntry) %>% 
+  dplyr::summarise(sumImpact = sum(impact_numeric, na.rm = T)) %>% 
+  left_join(token_lookup, by = c("token"="token")) %>% 
+  unite("name", c(firstname, lastname), sep= " ", remove = T)
+  
+  
+threatSum <- threatSum_step1 %>% filter(sumImpact<=1) %>% 
+  ungroup() %>% 
+  group_by(sppCode, cntry) %>% 
+  summarise(meanImpact = mean(sumImpact),
+            sd = sd(sumImpact),
+            n=n()) %>% 
+  filter(n>1)
+
+outlier_fig <- ggplot() +
+  geom_point(data = threatSum_step1, aes(y = sppCode, x = sumImpact, color = name, text = name), , alpha = 0.7, size = 3) + 
+  xlab("Sum of Threat Impacts") +
+  ylab("")+
+  ggtitle("Sum of Threat Impacts for Each Reviewer for Each Species") +
+  theme(axis.text.y = element_text(hjust = 1, size = 6), legend.text=element_text(size=10), plot.title = element_text(size = 12))
+
+outlier_figly <- ggplotly(outlier_fig, width = 1000, height = 1000, 
+                  tooltip = c("text", "y"))
+outlier_figly
+
+saveWidget(myfig, "/Users/ngoodby/Downloads/threat_ass.html")
+# %>% 
+#   assignImpact(., meanScope, meanSeverity) %>%
+#   mutate(impactScore = factor(impactScore, levels = c("negligible", "low", "medium", "high", "very high"))) %>% 
+#   left_join(threatNum, by = c("category" = "Q_group", "subcategory" = "Q_sub")) %>% 
+#   filter(!is.na(Threat))
+
+```
+
+```{r}
+library("scales")
+
+pop_numbers <- popSummary %>% filter(n>1) %>% 
+  pivot_wider(names_from = metric, values_from = meanValue) %>% ungroup() %>% select(sppCode, cntry, size, trend) %>%
+  group_by(sppCode, cntry) %>% 
+  summarise_all(list(~ sum(., na.rm = T))) %>% 
+  mutate(previous_pop = size - size*0.01*trend)
 
 
 
+# ggplot(pop_numbers, aes(size, trend, color = cntry)) + 
+#   geom_point(alpha = 0.5, size = 4) +
+#   geom_text(aes(label=sppCode)) +
+#   scale_x_continuous(labels = comma_format(big.mark = ",",
+#                                            decimal.mark = "."))
+#                      limits = c(0, 10e6))
+```
+
+```{r, fig.height = 4, fig.width = 4}
+overall_pop <- popSummary %>% filter(metric == "trend") %>% group_by(sppCode) %>% summarise(overall_trend = mean(meanValue)) %>% 
+  arrange(desc(overall_trend)) 
+
+spp_order <- overall_pop$sppCode
+wider$sppCode <- factor(wider$sppCode, levels = spp_order)
+
+wider %>% filter(subcategory == "tr" & !is.na(sppCode)) %>% group_by(sppCode, cntry) %>% summarise(min = mean(as.numeric(min)),
+                                                 max = mean(as.numeric(max)),
+                                                 mean = mean(as.numeric(mean))) %>% 
+  ggplot(aes(y = sppCode, x = mean, color = cntry)) +
+  geom_vline(xintercept = 0, color = "grey") + 
+  geom_point() +
+  geom_errorbar(aes(y = sppCode, xmin = min, xmax = max), width = 0) +
+  geom_point(data = overall_pop, aes(y = sppCode, x = overall_trend), color = "red", alpha = 0.4, size = 3) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), text = element_text(size = 6))
+```
+
+```{r, fig.height = 4, fig.width = 4}
+library(plotly)
+library(htmlwidgets)
+#impact = scope x severity
+impact <- threatSum %>% 
+  mutate(min = (meanImpact - sd),
+        max = (meanImpact + sd))
+
+overall_impact <- impact %>% group_by(sppCode) %>% summarise(overall_mean_impact = mean(meanImpact),
+                                                             overall_min_impact = mean(min),
+                                                             overall_max_impact = mean(max)) %>% 
+  arrange(overall_mean_impact)
+
+spp_order <- overall_impact$sppCode
+impact$sppCode <- factor(impact$sppCode, levels = spp_order)
+overall_impact$sppCode <- factor(overall_impact$sppCode, levels = spp_order)
+
+fig <- ggplot() +
+  geom_vline(xintercept = 1, linetype = "dashed") + 
+  geom_errorbar(data = overall_impact, aes(y = sppCode, xmin = overall_min_impact, xmax = overall_max_impact), width = 1, color = "grey")+
+  # geom_errorbar(aes(y = sppCode, xmin = min, xmax = max, color = cntry), width = 0) 
+  geom_point(data = impact, aes(y = sppCode, x = meanImpact, color = cntry), alpha = 0.7, size = 4) +
+  geom_point(data = overall_impact, aes(y = sppCode, x = overall_mean_impact), color = 'purple', size =2, shape = 4) +
+  xlab("Threat Impact") +
+  ylab("")+
+  ggtitle("Overall Threat Impact on North American Bat Species (impact = scope x severity)") +
+  theme(axis.text.y = element_text(hjust = 1, size = 6), legend.text=element_text(size=10), plot.title = element_text(size = 12))
+
+myfig <- ggplotly(fig, width = 1000, height = 1000, 
+                  tooltip = c("x", "y"))
+myfig
+
+saveWidget(myfig, "/Users/ngoodby/Downloads/fig.html")
+```
+
+```{r}
+threatSum %>% 
+  group_by(cntry, sppCode) %>% 
+  summarize(totalDec=sum(meanImpact, na.rm = T)) %>% 
+  arrange(-totalDec)
+```
+
+```{r}
+threats %>% 
+  select(sppCode, subcategory, impact_numeric) %>% 
+  mutate(impact_numeric=case_when(is.na(impact_numeric) ~ 0,
+                                  T~impact_numeric)) %>% 
+  filter(!is.na(sppCode),
+         !is.na(subcategory),
+         !is.na(impact_numeric)) %>% 
+  kmeans(centers=10)
+```
+
+```{r}
+threatSum %>% 
+  group_by(cntry, sppCode) %>% 
+  summarize(totalDec=sum(meanImpact, na.rm = T)) %>% 
+  arrange(-totalDec) %>% 
+  group_by(cntry) %>% 
+  summarize(n_gt1 = sum(totalDec>1),
+            n_tn1 = sum(totalDec<1))
+```
+
+```{r}
+threatSum %>% 
+  group_by(cntry, sppCode) %>% 
+  summarize(totalDec=sum(meanImpact, na.rm = T)) %>% 
+  arrange(-totalDec) %>% 
+  group_by(cntry) %>%
+  ggplot(aes(y=totalDec, fill= cntry, group=cntry))+
+  geom_histogram()
+```
+
+```{r fig.height=4.5, fig.width=4}
+threatSum %>%
+  group_by(cntry, sppCode, Threat) %>% 
+  summarize(totalCat_Dec=sum(meanImpact, na.rm = T)) %>% 
+  group_by(cntry, sppCode) %>% 
+  mutate(rank=rank(totalCat_Dec)) %>% 
+  group_by(cntry, Threat) %>% 
+  summarize(n=n(),
+            totalRank=sum(rank),
+            avgRank=totalRank/n) %>% 
+  arrange(cntry,totalRank) %>% 
+  ggplot(aes(x=Threat, y=avgRank, group=cntry, fill=cntry))+
+  geom_col()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
 ```
 
 
@@ -557,9 +711,7 @@ plotThreat <- function(cntry_sel){
   threatSub <- threatSppCount %>% 
     filter(cntry == cntry_sel) 
   
-  threatRank <- threatSub %>% complete(threat_abbrev, totImpactScore) %>% filter(totImpactScore == "very high") %>% 
-    mutate(noSpp = ifelse(is.na(noSpp), 0, noSpp)) %>%
-    arrange(noSpp) %>% pull(threat_abbrev) 
+  threatRank <- threatSub %>% complete(threat_abbrev, totImpactScore) %>% filter(totImpactScore == "very high") %>% mutate(noSpp = ifelse(is.na(noSpp), 0, noSpp)) %>%  arrange(noSpp) %>% pull(threat_abbrev) 
   
   threatSub %>% 
     mutate(threat_abbrev = factor(threat_abbrev, levels = threatRank)) %>% 
